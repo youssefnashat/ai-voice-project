@@ -3,8 +3,9 @@
 import { useState, useEffect, useRef, useCallback } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import { useSession } from "@/hooks/useSession";
-import { useSpeechRecognition } from "@/hooks/useSpeechRecognition";
-import { useAudioPlayback } from "@/hooks/useAudioPlayback";
+import { useUnifiedSTT } from "@/hooks/useUnifiedSTT";
+import { useUnifiedTTS } from "@/hooks/useUnifiedTTS";
+import { useLLMTimeout } from "@/lib/llm-timeout";
 import { Scorecard as ScorecardType } from "@/types";
 import { MarcusAvatar } from "./MarcusAvatar";
 import { StatusHUD } from "./StatusHUD";
@@ -79,51 +80,79 @@ const buttonTap = {
 
 export function PitchRoom() {
   const session = useSession();
-  const { playAudio, playFallbackTTS, stop: stopAudio } = useAudioPlayback();
+  const tts = useUnifiedTTS();
+  const { fetchWithTimeout, status: llmStatus, getStallMessage } = useLLMTimeout();
   const [scorecard, setScorecard] = useState<ScorecardType | null>(null);
   const [isProcessing, setIsProcessing] = useState(false);
-  const [silenceCount, setSilenceCount] = useState(0);
   const [agentSpeaking, setAgentSpeaking] = useState(false);
   const [lastUserMessage, setLastUserMessage] = useState("");
   const [showRoom, setShowRoom] = useState(false);
+  const [silenceWarning, setSilenceWarning] = useState(false);
   const interimRef = useRef("");
   const finalTextRef = useRef("");
+  const lastSpeechTimestamp = useRef<number>(0);
+  const silenceIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
-  const { start: startListening, stop: stopListening, isListening, isSilent } =
-    useSpeechRecognition({
-      onResult: (transcript: string, isFinal: boolean) => {
-        if (!isFinal) {
-          interimRef.current = transcript;
-          session.addTranscriptEntry("user", transcript, true);
-        } else {
-          finalTextRef.current += transcript + " ";
-          session.addTranscriptEntry("user", transcript.trim(), false);
-          setSilenceCount(0);
-        }
-      },
-      onError: (error: string) => {
-        console.error("STT Error:", error);
-      },
-    });
+  const {
+    start: startListening,
+    stop: stopListening,
+    isListening,
+    isSilent,
+    activeProvider: sttProvider,
+  } = useUnifiedSTT({
+    onResult: (transcript: string, isFinal: boolean) => {
+      lastSpeechTimestamp.current = Date.now();
+      setSilenceWarning(false);
+      if (!isFinal) {
+        interimRef.current = transcript;
+        session.addTranscriptEntry("user", transcript, true);
+      } else {
+        finalTextRef.current += transcript + " ";
+        session.addTranscriptEntry("user", transcript.trim(), false);
+      }
+    },
+    onError: (error: string) => {
+      console.error("STT Error:", error);
+    },
+  });
 
-  // Silence detection
+  // Time-based silence detection
   useEffect(() => {
-    if (!isSilent || !isListening) return;
+    if (!isListening) {
+      if (silenceIntervalRef.current) {
+        clearInterval(silenceIntervalRef.current);
+        silenceIntervalRef.current = null;
+      }
+      setSilenceWarning(false);
+      return;
+    }
 
-    setSilenceCount((prev) => prev + 1);
-    const silenceTimer = setTimeout(() => {
-      if (silenceCount > 4) {
+    lastSpeechTimestamp.current = Date.now();
+
+    silenceIntervalRef.current = setInterval(() => {
+      const elapsed = Date.now() - lastSpeechTimestamp.current;
+      if (elapsed >= 15000 && finalTextRef.current.trim()) {
         handleEndTurn();
+      } else if (elapsed >= 5000) {
+        setSilenceWarning(true);
+      } else {
+        setSilenceWarning(false);
       }
     }, 1000);
 
-    return () => clearTimeout(silenceTimer);
-  }, [isSilent, isListening, silenceCount]);
+    return () => {
+      if (silenceIntervalRef.current) {
+        clearInterval(silenceIntervalRef.current);
+        silenceIntervalRef.current = null;
+      }
+    };
+  }, [isListening]);
 
   const handleEndTurn = useCallback(async () => {
     if (!finalTextRef.current.trim() || isProcessing) return;
 
     stopListening();
+    setSilenceWarning(false);
     setIsProcessing(true);
 
     const userMessage = finalTextRef.current.trim();
@@ -132,10 +161,17 @@ export function PitchRoom() {
     setLastUserMessage(userMessage);
     session.addHistoryEntry("user", userMessage);
 
+    const headers: Record<string, string> = {
+      "Content-Type": "application/json",
+    };
+    if (tts.isSmallestActive) {
+      headers["X-Skip-TTS"] = "true";
+    }
+
     try {
-      const response = await fetch("/api/chat", {
+      const response = await fetchWithTimeout("/api/chat", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers,
         body: JSON.stringify({
           userMessage,
           history: session.history,
@@ -144,25 +180,37 @@ export function PitchRoom() {
 
       if (!response.ok) throw new Error("Chat API failed");
 
-      const agentText = response.headers.get("X-Agent-Text");
-      if (!agentText) throw new Error("No agent text in response");
+      // Extract agent text — from header or JSON body
+      let decodedAgentText: string;
+      const headerText = response.headers.get("X-Agent-Text");
+      if (headerText) {
+        decodedAgentText = decodeURIComponent(headerText);
+      } else {
+        const json = await response.json();
+        decodedAgentText = json.agentText;
+      }
 
-      const decodedAgentText = decodeURIComponent(agentText);
       session.addHistoryEntry("assistant", decodedAgentText);
       session.addTranscriptEntry("investor", decodedAgentText, false);
       session.recordExchange();
 
       setAgentSpeaking(true);
       try {
-        const audioBlob = await response.blob();
-        if (audioBlob.size > 0) {
-          await playAudio(audioBlob);
+        if (tts.isSmallestActive) {
+          // Client-side TTS via Smallest AI
+          await tts.speak(decodedAgentText);
         } else {
-          await playFallbackTTS(decodedAgentText);
+          // Server-side TTS via ElevenLabs (audio in response body)
+          const audioBlob = await response.blob();
+          if (audioBlob.size > 0) {
+            await tts.playAudio(audioBlob);
+          } else {
+            await tts.playFallbackTTS(decodedAgentText);
+          }
         }
       } catch (audioError) {
         console.error("Audio playback failed:", audioError);
-        await playFallbackTTS(decodedAgentText);
+        await tts.playFallbackTTS(decodedAgentText);
       } finally {
         setAgentSpeaking(false);
       }
@@ -173,7 +221,7 @@ export function PitchRoom() {
     } catch (error) {
       console.error("Chat error:", error);
       setAgentSpeaking(false);
-      const fallback = "That's interesting. Please try again.";
+      const fallback = getStallMessage();
       session.addTranscriptEntry("investor", fallback, false);
       session.addHistoryEntry("assistant", fallback);
       if (session.phase !== "scorecard") {
@@ -182,11 +230,11 @@ export function PitchRoom() {
     } finally {
       setIsProcessing(false);
     }
-  }, [isProcessing, session, stopListening, startListening, playAudio, playFallbackTTS]);
+  }, [isProcessing, session, stopListening, startListening, tts, fetchWithTimeout, getStallMessage]);
 
   const handleStartPitch = () => {
     setScorecard(null);
-    setSilenceCount(0);
+    setSilenceWarning(false);
     session.startPitch();
     setShowRoom(true);
     setTimeout(() => startListening(), 1200);
@@ -194,7 +242,7 @@ export function PitchRoom() {
 
   const handleEndCall = () => {
     stopListening();
-    stopAudio();
+    tts.stop();
     session.endPitch();
     generateScorecard();
   };
@@ -221,7 +269,7 @@ export function PitchRoom() {
 
   const handlePracticeAgain = () => {
     setScorecard(null);
-    setSilenceCount(0);
+    setSilenceWarning(false);
     setShowRoom(false);
     session.reset();
   };
@@ -342,6 +390,9 @@ export function PitchRoom() {
             className="font-mono text-[10px] text-text-muted/40 tracking-[0.3em] uppercase"
           >
             Mastra &middot; Groq &middot; ElevenLabs
+            {(sttProvider === "smallest" || tts.activeProvider === "smallest") && (
+              <> &middot; Smallest AI</>
+            )}
           </motion.p>
         </motion.div>
       </div>
@@ -459,6 +510,24 @@ export function PitchRoom() {
                 isListening={isListening && !agentSpeaking}
                 isProcessing={isProcessing}
               />
+
+              {/* LLM timeout status */}
+              <AnimatePresence>
+                {llmStatus !== "idle" && (
+                  <motion.div
+                    initial={{ opacity: 0, y: 10 }}
+                    animate={{ opacity: 1, y: 0 }}
+                    exit={{ opacity: 0, y: -10 }}
+                    className="absolute bottom-4 left-0 right-0 text-center"
+                  >
+                    <span className="font-mono text-[11px] tracking-wider text-cyan/70">
+                      {llmStatus === "thinking"
+                        ? "Marcus is thinking..."
+                        : "Marcus is still thinking..."}
+                    </span>
+                  </motion.div>
+                )}
+              </AnimatePresence>
             </motion.div>
 
             {/* Transcript */}
@@ -538,6 +607,20 @@ export function PitchRoom() {
                       Rec
                     </span>
                   </motion.div>
+                )}
+              </AnimatePresence>
+
+              {/* Silence warning */}
+              <AnimatePresence>
+                {silenceWarning && isListening && (
+                  <motion.span
+                    initial={{ opacity: 0 }}
+                    animate={{ opacity: 1 }}
+                    exit={{ opacity: 0 }}
+                    className="font-mono text-[10px] text-text-muted tracking-wider"
+                  >
+                    Still listening...
+                  </motion.span>
                 )}
               </AnimatePresence>
             </motion.div>

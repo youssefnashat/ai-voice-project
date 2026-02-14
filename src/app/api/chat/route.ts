@@ -19,6 +19,15 @@ export async function POST(request: NextRequest) {
 
     const agentText = result.text || "That's an interesting point. Let me think about that.";
 
+    // If client handles TTS (Smallest AI), skip ElevenLabs and return JSON
+    const skipTTS = request.headers.get("X-Skip-TTS") === "true";
+    if (skipTTS) {
+      return NextResponse.json(
+        { agentText },
+        { headers: { "X-Agent-Text": encodeURIComponent(agentText) } }
+      );
+    }
+
     // Send to ElevenLabs for TTS
     const elevenLabsResponse = await fetch(
       `https://api.elevenlabs.io/v1/text-to-speech/${process.env.ELEVENLABS_VOICE_ID}/stream`,

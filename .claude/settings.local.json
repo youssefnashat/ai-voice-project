@@ -2,7 +2,11 @@
   "permissions": {
     "allow": [
       "Bash(npm install:*)",
-      "Bash(npx next build)"
+      "Bash(npx next build)",
+      "WebSearch",
+      "WebFetch(domain:waves-docs.smallest.ai)",
+      "WebFetch(domain:github.com)",
+      "Bash(npm run build:*)"
     ]
   }
 }
