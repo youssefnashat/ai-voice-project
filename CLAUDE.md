@@ -17,8 +17,9 @@ No test runner is configured. TypeScript errors are caught during `npm run build
 
 Copy `.env.example` to `.env.local` and fill in:
 - `GROQ_API_KEY` — Groq API key (powers both Mastra agents)
-- `ELEVENLABS_API_KEY` — ElevenLabs TTS key
-- `ELEVENLABS_VOICE_ID` — ElevenLabs voice (default: `pNInz6obpgDQGcFmaJgB`)
+- `NEXT_PUBLIC_SMALLEST_API_KEY` — Smallest AI API key (STT + TTS)
+- `NEXT_PUBLIC_STT_PROVIDER` — STT provider: `smallest` (default) or `browser`
+- `NEXT_PUBLIC_TTS_PROVIDER` — TTS provider: `smallest` (default) or `browser`
 
 ## Architecture
 
@@ -27,14 +28,14 @@ Copy `.env.example` to `.env.local` and fill in:
 ### Data Flow
 
 ```
-Browser SpeechRecognition (client STT)
-  → useSpeechRecognition hook (interim/final results, 2s silence detection)
+Smallest AI Pulse WebSocket STT (client-side, 16kHz PCM)
+  → useUnifiedSTT hook (wraps useSmallestSTT, auto-fallback to browser STT)
   → PitchRoom component (orchestrator, manages session state)
-  → POST /api/chat { userMessage, history }
+  → POST /api/chat { userMessage, history } with X-Skip-TTS header
   → Mastra investorAgent (Groq Llama 3.3 70B)
-  → ElevenLabs TTS streaming (server-side, eleven_turbo_v2_5)
-  → Audio blob returned to client
-  → useAudioPlayback hook (with speechSynthesis fallback)
+  → Returns JSON { agentText } (no server-side TTS)
+  → Client plays via Smallest AI Lightning v2 WebSocket TTS
+  → useUnifiedTTS hook (wraps useSmallestTTS, auto-fallback to browser TTS)
   → Repeat 3-4 exchanges
   → POST /api/scorecard → evaluatorAgent → JSON scorecard
 ```
@@ -42,9 +43,10 @@ Browser SpeechRecognition (client STT)
 ### Key Layers
 
 - **`src/mastra/`** — Mastra agent definitions. Two agents share `groq("llama-3.3-70b-versatile")`. The investor agent responds in <3 sentences with no markdown. The evaluator agent returns strict JSON with 5 scored dimensions.
-- **`src/app/api/`** — Two POST routes. `/api/chat` calls the investor agent then streams ElevenLabs TTS audio back with agent text in the `X-Agent-Text` response header. `/api/scorecard` returns the evaluator's JSON scorecard.
-- **`src/hooks/`** — Three hooks: `useSession` (phase machine: landing→pitch→qa→negotiation→scorecard, transcript, history), `useSpeechRecognition` (Web Speech API wrapper, auto-restart, silence detection), `useAudioPlayback` (blob playback with browser TTS fallback).
-- **`src/components/PitchRoom.tsx`** — Main orchestrator. Manages the full session lifecycle, silence-triggered turn ending, API calls, and renders all sub-components. This is the single entry point rendered by `page.tsx`.
+- **`src/app/api/`** — Two POST routes. `/api/chat` calls the investor agent; returns JSON `{ agentText }` when `X-Skip-TTS: true` header present (default). `/api/scorecard` returns the evaluator's JSON scorecard.
+- **`src/hooks/`** — Seven hooks: `useSession` (phase machine), `useSmallestSTT` (Pulse WebSocket STT), `useSmallestTTS` (Lightning v2 WebSocket TTS), `useUnifiedSTT` (STT with auto-fallback), `useUnifiedTTS` (TTS with fallback chain), `useSpeechRecognition` (browser STT fallback), `useAudioPlayback` (browser TTS fallback).
+- **`src/lib/`** — `feature-flags.ts` (runtime STT/TTS provider selection with localStorage override), `llm-timeout.ts` (LLM response timeout tracking), `demo-script.ts` (console helpers for toggling providers).
+- **`src/components/PitchRoom.tsx`** — Main orchestrator. Uses unified STT/TTS hooks, time-based silence detection (5s warning, 15s auto-end), LLM timeout status UI. Single entry point rendered by `page.tsx`.
 
 ### Phase Progression
 
@@ -63,4 +65,4 @@ Tailwind CSS v4 with a custom dark theme defined in `globals.css` via CSS variab
 
 ## Browser Requirements
 
-Chrome/Chromium required for SpeechRecognition API (client-side STT). Microphone permission needed.
+Microphone permission required. Smallest AI STT works in any modern browser. Browser SpeechRecognition fallback requires Chrome/Chromium.

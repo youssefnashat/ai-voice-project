@@ -1,32 +1,30 @@
 # VoicePitch v2 — AI Voice Pitch Simulator
 
-A voice-first startup pitch simulator powered by **Mastra** (agent orchestration), **Groq Llama 3.3 70B** (fast LLM inference), and **ElevenLabs** (natural TTS). Users deliver a live pitch to an AI investor agent (Marcus Chen) who challenges and questions in real-time voice. After 3-4 exchanges, users get a structured scorecard with scores, evidence, and pitch improvements.
+A voice-first startup pitch simulator powered by **Smallest AI** (real-time WebSocket STT + TTS), **Groq Llama 3.3 70B** (fast LLM inference), and **Mastra** (agent orchestration). Users deliver a live pitch to an AI investor agent (Marcus Chen) who challenges and questions in real-time voice. After 3-4 exchanges, users get a structured scorecard with scores, evidence, and pitch improvements.
 
-**Hackathon:** AI Agents Voice Hackathon (Kitchener, Feb 13–15, 2026)  
-**Sponsor:** Mastra (deep integration tier)
+**Hackathon:** AI Agents Voice Hackathon (Kitchener, Feb 13-15, 2026)
 
 ---
 
 ## Key Features
 
-✅ **Voice-First UX** — Browser SpeechRecognition API (free, client-side, Chrome)  
-✅ **Real-Time Agent** — Marcus Chen investor challenges your pitch via voice  
-✅ **Mastra Deep Integration** — All LLM calls routed through Mastra agents  
-✅ **Fast Inference** — Groq Llama 3.3 70B (~280 tok/s)  
-✅ **Natural TTS** — ElevenLabs streaming audio (eleven_turbo_v2_5)  
-✅ **Structured Feedback** — Post-call scorecard (clarity, market, traction, unit economics, delivery)  
-✅ **No Database** — In-memory state, HTTP request/response only
+- **Voice-First UX** — Smallest AI Pulse WebSocket for real-time speech-to-text
+- **Natural TTS** — Smallest AI Lightning v2 WebSocket for text-to-speech streaming
+- **Real-Time Agent** — Marcus Chen AI investor challenges your pitch via voice
+- **Fast Inference** — Groq Llama 3.3 70B (~280 tok/s)
+- **Structured Feedback** — Post-call scorecard (clarity, market, traction, unit economics, delivery)
+- **Auto-Fallback** — Graceful degradation to browser STT/TTS if Smallest AI is unavailable
+- **No Database** — In-memory state, WebSocket + HTTP only
 
 ---
 
 ## Tech Stack
 
-- **Framework:** Next.js 14 (App Router) + TypeScript
-- **Agent Framework:** Mastra (@mastra/core)
-- **LLM:** Groq Llama 3.3 70B (@ai-sdk/groq)
-- **TTS:** ElevenLabs streaming API
-- **STT:** Browser SpeechRecognition API
-- **Styling:** Tailwind CSS
+- **Framework:** Next.js 16 (App Router) + React 19 + TypeScript strict mode
+- **Voice STT:** Smallest AI Pulse (WebSocket)
+- **Voice TTS:** Smallest AI Lightning v2 (WebSocket)
+- **LLM:** Groq Llama 3.3 70B via Mastra agents
+- **Styling:** Tailwind CSS v4 + Framer Motion
 
 ---
 
@@ -34,9 +32,9 @@ A voice-first startup pitch simulator powered by **Mastra** (agent orchestration
 
 ### Prerequisites
 - Node.js 18+ and npm
-- Groq API key
-- ElevenLabs API key
-- Chrome browser
+- Groq API key ([groq.com](https://groq.com))
+- Smallest AI API key ([smallest.ai](https://smallest.ai))
+- Any modern browser with microphone access
 
 ### Installation
 
@@ -50,8 +48,9 @@ Create `.env.local`:
 
 ```
 GROQ_API_KEY=your_groq_api_key
-ELEVENLABS_API_KEY=your_elevenlabs_api_key
-ELEVENLABS_VOICE_ID=pNInz6obpgDQGcFmaJgB
+NEXT_PUBLIC_SMALLEST_API_KEY=your_smallest_api_key
+NEXT_PUBLIC_STT_PROVIDER=smallest
+NEXT_PUBLIC_TTS_PROVIDER=smallest
 ```
 
 ### Run Development Server
@@ -60,42 +59,22 @@ ELEVENLABS_VOICE_ID=pNInz6obpgDQGcFmaJgB
 npm run dev
 ```
 
-Open http://localhost:3000 in Chrome.
+Open http://localhost:3000 in your browser.
 
 ---
 
 ## Architecture
 
-Simple HTTP request/response cycle:
-
-1. User speaks → Browser SpeechRecognition (client-side STT) → transcript text
-2. POST /api/chat { userMessage, history }
-3. API route calls Mastra investorAgent.generate()
-4. Mastra routes to Groq Llama 3.3 70B
-5. Agent response text sent to ElevenLabs streaming TTS
-6. Audio stream + agent text header returned to client
-7. Client plays audio, displays text
-8. Repeat 3-4 exchanges
-9. POST /api/scorecard { transcript }
-10. evaluatorAgent generates JSON scorecard
-11. Render scorecard UI
-
----
-
-## Mastra Deep Integration
-
-### Two Agents
-
-1. **investorAgent** ("Marcus Chen")
-   - Asks probing questions, makes counteroffers 30-50% below founder's ask
-   - Uses natural phrases: "Look,", "Here's my concern,", "Walk me through..."
-
-2. **evaluatorAgent**
-   - Post-call scorecard generation
-   - Scores 5 dimensions (clarity, market, traction, unit_economics, delivery)
-   - Returns rewritten pitch opener + improved answer
-
-Both agents registered in `src/mastra/index.ts` and accessed via `mastra.getAgent("name").generate(messages)`.
+1. User speaks -> Smallest AI Pulse WebSocket STT -> transcript text
+2. POST /api/chat { userMessage, history } with `X-Skip-TTS` header
+3. Mastra investorAgent generates response via Groq Llama 3.3 70B
+4. Agent text returned as JSON to client
+5. Client plays response via Smallest AI Lightning v2 WebSocket TTS
+6. Displays text in transcript
+7. Repeat 3-4 exchanges
+8. POST /api/scorecard { transcript }
+9. Mastra evaluatorAgent generates JSON scorecard
+10. Render scorecard UI
 
 ---
 
@@ -108,7 +87,7 @@ Request:
 { "userMessage": "...", "history": [...] }
 ```
 
-Response: Audio stream + `X-Agent-Text` header with agent response
+Response: JSON `{ agentText }` when `X-Skip-TTS: true` header sent (default with Smallest AI)
 
 ### POST /api/scorecard
 
@@ -123,12 +102,12 @@ Response: Scorecard JSON (5 dimension scores, overall score, improvements)
 
 ## Conversation Flow
 
-- Exchange 0: User pitch → Phase: qa
-- Exchanges 1-2: Agent asks questions → Phase: negotiation
-- Exchange 3: Agent makes counteroffer → End call or continue
+- Exchange 0: User pitch -> Phase: qa
+- Exchanges 1-2: Agent asks questions -> Phase: negotiation
+- Exchange 3: Agent makes counteroffer -> End call or continue
 - End: Generate scorecard
 
-**Silence Handling:** 10+ seconds auto-ends conversation
+**Silence Handling:** 5s -> "Still listening..." warning, 15s -> auto-ends turn
 
 ---
 
@@ -149,16 +128,23 @@ src/
 │       └── scorecard/route.ts
 ├── components/
 │   ├── PitchRoom.tsx
-│   ├── PhaseIndicator.tsx
-│   ├── Timer.tsx
-│   ├── AgentCard.tsx
+│   ├── MarcusAvatar.tsx
+│   ├── StatusHUD.tsx
+│   ├── LiveDeckFeed.tsx
 │   ├── TranscriptPanel.tsx
-│   ├── ScoreBar.tsx
 │   └── Scorecard.tsx
 ├── hooks/
-│   ├── useSpeechRecognition.ts
-│   ├── useAudioPlayback.ts
+│   ├── useUnifiedSTT.ts        <- unified STT (Smallest AI + browser fallback)
+│   ├── useUnifiedTTS.ts        <- unified TTS (Smallest AI + browser fallback)
+│   ├── useSmallestSTT.ts       <- Smallest AI Pulse WebSocket STT
+│   ├── useSmallestTTS.ts       <- Smallest AI Lightning v2 WebSocket TTS
+│   ├── useSpeechRecognition.ts <- browser STT fallback
+│   ├── useAudioPlayback.ts     <- browser TTS fallback
 │   └── useSession.ts
+├── lib/
+│   ├── feature-flags.ts        <- runtime provider selection
+│   ├── llm-timeout.ts          <- LLM response timeout tracking
+│   └── demo-script.ts          <- console helpers for demos
 └── types/
     └── index.ts
 ```
@@ -167,33 +153,33 @@ src/
 
 ## Usage
 
-1. Click "Start Your Pitch"
+1. Click "Enter the Pitch Room"
 2. Grant mic permission
 3. Deliver pitch (30-60 seconds)
-4. Hear agent response (with fallback text)
+4. Hear Marcus respond via Smallest AI TTS
 5. Repeat 3-4 exchanges
-6. Click "End Call"
+6. Click "End Pitch"
 7. View scorecard with improvements
 
 ---
 
 ## Error Recovery
 
-- **SpeechRecognition not supported:** Show message, try text input
-- **Mic failure:** Auto-restart with max 3 retries, then text fallback
-- **ElevenLabs TTS fails:** Fall back to browser speechSynthesis
-- **Long silence (10s):** Auto-end and generate scorecard
+- **Smallest AI STT fails:** Auto-fallback to browser SpeechRecognition
+- **Smallest AI TTS fails:** Auto-fallback to browser speechSynthesis
+- **Mic failure:** Auto-restart with max 3 retries
+- **LLM slow response:** "Marcus is thinking..." (8s) -> "Marcus is still thinking..." (15s)
+- **5s silence:** "Still listening..." warning
+- **15s silence:** Auto-end turn and send to agent
 
 ---
 
-## Coding Standards
+## Demo Tips
 
-- TypeScript strict mode
-- All props typed (no `any`)
-- Mastra for all LLM calls (never raw Groq SDK)
-- Agent responses <3 sentences, natural speech
-- Tailwind CSS only
-- Commit every 30-60 min with prefixes: `feat:`, `fix:`, `ui:`, `agent:`, `voice:`, `docs:`, `chore:`
+- Deliberately pause 5+ seconds during pitch to show "Still listening..." warning
+- Cycles through 3-4 agent exchanges to show Q&A -> Negotiation flow
+- Show final scorecard with all 5 dimensions and improvement recommendations
+- Toggle providers live in console: `__voicepitch.toggleSTT('browser')` / `__voicepitch.toggleTTS('smallest')`
 
 ---
 
@@ -204,27 +190,17 @@ npm run build
 npm start
 ```
 
-Deploy to Vercel. Use platform secrets for environment variables.
-
 ---
 
-## Demo Tips
+## Resources
 
-- Deliberately pause 4+ seconds during pitch to show "Still there?" error recovery prompt
-- Cycles through 3-4 agent exchanges to show Q&A → Negotiation flow
-- Show final scorecard with all 5 dimensions and improvement recommendations
-
----
-
-## Support
-
-- Groq: groq.com/docs
-- ElevenLabs: elevenlabs.io/docs
-- Mastra: mastra.ai/docs
-- Next.js: nextjs.org/docs
+- **Smallest AI:** https://smallest.ai/docs
+- **Groq:** https://groq.com/docs
+- **Mastra:** https://mastra.ai/docs
+- **Next.js:** https://nextjs.org/docs
 
 ---
 
 ## License
 
-MIT. Built during AI Agents Voice Hackathon, Feb 13–15, 2026.
+MIT. Built during AI Agents Voice Hackathon, Feb 13-15, 2026.

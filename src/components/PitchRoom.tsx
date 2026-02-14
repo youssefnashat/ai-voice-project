@@ -389,10 +389,7 @@ export function PitchRoom() {
             variants={itemVariants}
             className="font-mono text-[10px] text-text-muted/40 tracking-[0.3em] uppercase"
           >
-            Mastra &middot; Groq &middot; ElevenLabs
-            {(sttProvider === "smallest" || tts.activeProvider === "smallest") && (
-              <> &middot; Smallest AI</>
-            )}
+            Smallest AI &middot; Groq &middot; Mastra
           </motion.p>
         </motion.div>
       </div>
