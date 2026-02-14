@@ -1,9 +1,9 @@
 import { STTProvider, TTSProvider } from "@/types";
 
 const ENV_STT: STTProvider =
-  (process.env.NEXT_PUBLIC_STT_PROVIDER as STTProvider) || "browser";
+  (process.env.NEXT_PUBLIC_STT_PROVIDER as STTProvider) || "smallest";
 const ENV_TTS: TTSProvider =
-  (process.env.NEXT_PUBLIC_TTS_PROVIDER as TTSProvider) || "elevenlabs";
+  (process.env.NEXT_PUBLIC_TTS_PROVIDER as TTSProvider) || "smallest";
 
 function readLocalStorage(key: string): string | null {
   if (typeof window === "undefined") return null;
