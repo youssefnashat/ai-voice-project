@@ -84,6 +84,9 @@ export function useSmallestSTT(): UseSmallestSTTReturn {
     }
   }, [clearSilenceTimers]);
 
+  const stateRef = useRef<STTState>(state);
+  stateRef.current = state;
+
   const setupFallbackSTT = useCallback(() => {
     const SpeechRecognition =
       (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
@@ -116,8 +119,8 @@ export function useSmallestSTT(): UseSmallestSTTReturn {
     };
 
     recognition.onend = () => {
-      // Auto-restart if still supposed to be listening
-      if (state === "listening" && fallbackRef.current) {
+      // Auto-restart if still supposed to be listening (use ref to avoid stale closure)
+      if (stateRef.current === "listening" && fallbackRef.current) {
         try {
           recognition.start();
         } catch {
@@ -128,7 +131,7 @@ export function useSmallestSTT(): UseSmallestSTTReturn {
 
     fallbackRef.current = recognition;
     return true;
-  }, [resetSilenceTimers, state]);
+  }, [resetSilenceTimers]);
 
   const startSmallestSTT = useCallback(async (): Promise<void> => {
     const apiKey = process.env.NEXT_PUBLIC_SMALLEST_API_KEY;
@@ -205,7 +208,10 @@ export function useSmallestSTT(): UseSmallestSTTReturn {
       };
 
       ws.onclose = () => {
-        setState("idle");
+        // Only reset state if this WS is still the active one (not cleaned up for fallback)
+        if (wsRef.current === ws) {
+          setState("idle");
+        }
       };
     });
   }, [resetSilenceTimers]);
@@ -223,12 +229,15 @@ export function useSmallestSTT(): UseSmallestSTTReturn {
         return;
       } catch (err) {
         console.warn("Smallest STT failed, falling back:", err);
+        // Clean up any partial resources (stream, audioContext, ws) before fallback
+        cleanup();
       }
     }
 
     // Fallback to browser STT
     setUsingFallback(true);
     if (setupFallbackSTT()) {
+      stateRef.current = "listening"; // Update ref synchronously for onend auto-restart
       setState("listening");
       fallbackRef.current.start();
       resetSilenceTimers();
@@ -236,7 +245,7 @@ export function useSmallestSTT(): UseSmallestSTTReturn {
       setState("error");
       setError("Speech recognition not supported in this browser");
     }
-  }, [startSmallestSTT, setupFallbackSTT, resetSilenceTimers]);
+  }, [startSmallestSTT, setupFallbackSTT, resetSilenceTimers, cleanup]);
 
   const stopListening = useCallback(() => {
     cleanup();

@@ -6,7 +6,8 @@
       "WebSearch",
       "WebFetch(domain:waves-docs.smallest.ai)",
       "WebFetch(domain:github.com)",
-      "Bash(npm run build:*)"
+      "Bash(npm run build:*)",
+      "Bash(ls:*)"
     ]
   }
 }
