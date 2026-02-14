@@ -11,7 +11,11 @@
   "dependencies": {
     "next": "16.1.6",
     "react": "19.2.3",
-    "react-dom": "19.2.3"
+    "react-dom": "19.2.3",
+    "@mastra/core": "latest",
+    "@ai-sdk/groq": "latest",
+    "ai": "latest",
+    "elevenlabs": "latest"
   },
   "devDependencies": {
     "@tailwindcss/postcss": "^4",

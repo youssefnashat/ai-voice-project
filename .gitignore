@@ -23,6 +23,16 @@
 # misc
 .DS_Store
 *.pem
+.env
+.env.local
+.env*.local
+
+# audio/video files
+*.mp3
+*.wav
+*.m4a
+*.webm
+*.mp4
 
 # debug
 npm-debug.log*
