@@ -1,7 +1,18 @@
 "use client";
 
-import { useState, useCallback } from "react";
+import { useState, useCallback, useEffect, useRef } from "react";
 import { TranscriptEntry, ConversationHistory, Phase } from "@/types";
+import { useSmallestSTT } from "./useSmallestSTT";
+import { useElevenLabsTTS } from "./useElevenLabsTTS";
+import { VOICE_CONFIG } from "@/lib/voice-config";
+
+type LLMStatus = "idle" | "thinking" | "stalling";
+
+const STALL_MESSAGES = [
+  "That's an interesting point. Give me a moment.",
+  "Let me think about that for a second.",
+  "Good question — processing that now.",
+];
 
 export function useSession() {
   const [phase, setPhase] = useState<Phase>("landing");
@@ -9,6 +20,33 @@ export function useSession() {
   const [history, setHistory] = useState<ConversationHistory[]>([]);
   const [exchangeCount, setExchangeCount] = useState(0);
   const [elapsedSeconds, setElapsedSeconds] = useState(0);
+  const [silenceWarning, setSilenceWarning] = useState(false);
+  const [marcusThinking, setMarcusThinking] = useState<LLMStatus>("idle");
+
+  const stt = useSmallestSTT();
+  const tts = useElevenLabsTTS();
+
+  // Refs for accessing latest state in event handlers
+  const historyRef = useRef(history);
+  historyRef.current = history;
+  const phaseRef = useRef(phase);
+  phaseRef.current = phase;
+  const exchangeCountRef = useRef(exchangeCount);
+  exchangeCountRef.current = exchangeCount;
+
+  // Silence event listeners
+  useEffect(() => {
+    const onSilenceWarning = () => setSilenceWarning(true);
+    const onSilenceTimeout = () => setSilenceWarning(false);
+
+    window.addEventListener("stt:silence-warning", onSilenceWarning);
+    window.addEventListener("stt:silence-timeout", onSilenceTimeout);
+
+    return () => {
+      window.removeEventListener("stt:silence-warning", onSilenceWarning);
+      window.removeEventListener("stt:silence-timeout", onSilenceTimeout);
+    };
+  }, []);
 
   const addTranscriptEntry = useCallback(
     (speaker: "user" | "investor", text: string, isInterim = false) => {
@@ -21,7 +59,6 @@ export function useSession() {
         isInterim,
       };
       setTranscript((prev) => {
-        // Update interim results in-place
         if (isInterim && prev.length > 0) {
           const last = prev[prev.length - 1];
           if (last.speaker === speaker && last.isInterim) {
@@ -41,51 +78,168 @@ export function useSession() {
     []
   );
 
-  const startPitch = useCallback(() => {
+  const recordExchange = useCallback(() => {
+    setExchangeCount((prev) => {
+      const next = prev + 1;
+      if (prev === 0) setPhase("qa");
+      else if (prev === 2) setPhase("negotiation");
+      else if (prev >= 3) setPhase("scorecard");
+      return next;
+    });
+  }, []);
+
+  const startPitch = useCallback(async () => {
     setPhase("pitch");
     setTranscript([]);
     setHistory([]);
     setExchangeCount(0);
     setElapsedSeconds(0);
-  }, []);
+    setSilenceWarning(false);
+    setMarcusThinking("idle");
+    await stt.startListening();
+  }, [stt]);
 
-  const endPitch = useCallback(() => {
-    setPhase("scorecard");
-  }, []);
+  const submitTurn = useCallback(async () => {
+    const userText = stt.transcript.trim();
+    if (!userText) return;
 
-  const recordExchange = useCallback(() => {
-    setExchangeCount((prev) => prev + 1);
+    stt.stopListening();
+    setSilenceWarning(false);
+    setMarcusThinking("idle");
 
-    // Update phase based on exchange count
-    if (exchangeCount === 0) {
-      setPhase("qa");
-    } else if (exchangeCount === 2) {
-      setPhase("negotiation");
-    } else if (exchangeCount >= 3) {
-      setPhase("scorecard");
+    // Add user message to transcript + history
+    addTranscriptEntry("user", userText, false);
+    addHistoryEntry("user", userText);
+
+    // LLM call with timeout tracking
+    let thinkingTimer: ReturnType<typeof setTimeout> | null = null;
+    let stallingTimer: ReturnType<typeof setTimeout> | null = null;
+
+    thinkingTimer = setTimeout(() => {
+      setMarcusThinking("thinking");
+    }, VOICE_CONFIG.TIMEOUTS.LLM);
+
+    stallingTimer = setTimeout(() => {
+      setMarcusThinking("stalling");
+    }, VOICE_CONFIG.TIMEOUTS.LLM_STALL);
+
+    try {
+      const response = await fetch("/api/chat", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          userMessage: userText,
+          history: historyRef.current,
+        }),
+      });
+
+      if (thinkingTimer) clearTimeout(thinkingTimer);
+      if (stallingTimer) clearTimeout(stallingTimer);
+      setMarcusThinking("idle");
+
+      if (!response.ok) throw new Error("Chat API failed");
+
+      const { agentText } = await response.json();
+      const text = agentText || "That's interesting. Let me think about that.";
+
+      addHistoryEntry("assistant", text);
+      addTranscriptEntry("investor", text, false);
+      recordExchange();
+
+      // Speak the response via ElevenLabs TTS
+      await tts.speak(text);
+
+      // Resume listening if not in scorecard
+      if (phaseRef.current !== "scorecard") {
+        stt.reset();
+        await stt.startListening();
+      }
+    } catch (err) {
+      if (thinkingTimer) clearTimeout(thinkingTimer);
+      if (stallingTimer) clearTimeout(stallingTimer);
+      setMarcusThinking("idle");
+
+      console.error("Turn error:", err);
+      const fallback =
+        STALL_MESSAGES[Math.floor(Math.random() * STALL_MESSAGES.length)];
+      addTranscriptEntry("investor", fallback, false);
+      addHistoryEntry("assistant", fallback);
+      await tts.speak(fallback);
+
+      if (phaseRef.current !== "scorecard") {
+        stt.reset();
+        await stt.startListening();
+      }
     }
-  }, [exchangeCount]);
+  }, [stt, tts, addTranscriptEntry, addHistoryEntry, recordExchange]);
+
+  const endSession = useCallback(async () => {
+    stt.stopListening();
+    tts.stop();
+    setPhase("scorecard");
+    setSilenceWarning(false);
+    setMarcusThinking("idle");
+
+    try {
+      const response = await fetch("/api/scorecard", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ transcript }),
+      });
+
+      if (!response.ok) return null;
+      return await response.json();
+    } catch (err) {
+      console.error("Scorecard error:", err);
+      return null;
+    }
+  }, [stt, tts, transcript]);
 
   const reset = useCallback(() => {
+    stt.stopListening();
+    stt.reset();
+    tts.stop();
     setPhase("landing");
     setTranscript([]);
     setHistory([]);
     setExchangeCount(0);
     setElapsedSeconds(0);
-  }, []);
+    setSilenceWarning(false);
+    setMarcusThinking("idle");
+  }, [stt, tts]);
 
   return {
+    // Session state
     phase,
     transcript,
     history,
     exchangeCount,
     elapsedSeconds,
     setElapsedSeconds,
+
+    // STT state
+    sttTranscript: stt.transcript,
+    interimTranscript: stt.interimTranscript,
+    isListening: stt.state === "listening",
+    sttState: stt.state,
+    usingFallbackSTT: stt.usingFallback,
+
+    // TTS state
+    isSpeaking: tts.isPlaying,
+    ttsState: tts.state,
+    usingFallbackTTS: tts.usingFallback,
+
+    // UI state
+    silenceWarning,
+    marcusThinking,
+
+    // Actions
+    startPitch,
+    submitTurn,
+    endSession,
+    reset,
     addTranscriptEntry,
     addHistoryEntry,
-    startPitch,
-    endPitch,
-    recordExchange,
-    reset,
+    stopListening: stt.stopListening,
   };
 }

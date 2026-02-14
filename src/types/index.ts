@@ -1,8 +1,5 @@
 // Data schemas for VoicePitch app
 
-export type STTProvider = "browser" | "smallest";
-export type TTSProvider = "elevenlabs" | "smallest" | "browser";
-
 export type Phase = "landing" | "pitch" | "qa" | "negotiation" | "scorecard";
 export type Speaker = "user" | "investor";
 export type Role = "user" | "assistant";

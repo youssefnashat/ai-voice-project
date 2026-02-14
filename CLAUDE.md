@@ -17,25 +17,27 @@ No test runner is configured. TypeScript errors are caught during `npm run build
 
 Copy `.env.example` to `.env.local` and fill in:
 - `GROQ_API_KEY` — Groq API key (powers both Mastra agents)
-- `NEXT_PUBLIC_SMALLEST_API_KEY` — Smallest AI API key (STT + TTS)
-- `NEXT_PUBLIC_STT_PROVIDER` — STT provider: `smallest` (default) or `browser`
-- `NEXT_PUBLIC_TTS_PROVIDER` — TTS provider: `smallest` (default) or `browser`
+- `NEXT_PUBLIC_SMALLEST_API_KEY` — Smallest AI API key (STT, client-side WebSocket)
+- `ELEVENLABS_API_KEY` — ElevenLabs API key (TTS, server-side via `/api/tts`)
+- `ELEVENLABS_VOICE_ID` — ElevenLabs voice ID (default: `pNInz6obpgDQGcFmaJgB`)
+- `ELEVENLABS_MODEL_ID` — ElevenLabs model (default: `eleven_turbo_v2_5`)
+- `NEXT_PUBLIC_USE_SMALLEST_STT` — Enable Smallest AI STT (default: `true`)
+- `NEXT_PUBLIC_USE_ELEVENLABS_TTS` — Enable ElevenLabs TTS (default: `true`)
 
 ## Architecture
 
-**VoicePitch** is a voice-first AI startup pitch simulator. Users speak to "Marcus Chen," an AI investor, through their browser microphone. The app is Next.js 16 (App Router) + React 19 + TypeScript strict mode.
+**VoicePitch** is a voice-first AI startup pitch simulator. Hybrid voice architecture: Smallest AI for STT, ElevenLabs for TTS. Next.js 16 (App Router) + React 19 + TypeScript strict mode.
 
 ### Data Flow
 
 ```
-Smallest AI Pulse WebSocket STT (client-side, 16kHz PCM)
-  → useUnifiedSTT hook (wraps useSmallestSTT, auto-fallback to browser STT)
-  → PitchRoom component (orchestrator, manages session state)
-  → POST /api/chat { userMessage, history } with X-Skip-TTS header
+Smallest AI Pulse WebSocket STT (client-side, 16kHz PCM, ~64ms)
+  → useSmallestSTT hook (transcript + interim, silence detection)
+  → useSession hook (merged orchestrator: STT + TTS + LLM timeout + state)
+  → POST /api/chat { userMessage, history } → JSON { agentText }
   → Mastra investorAgent (Groq Llama 3.3 70B)
-  → Returns JSON { agentText } (no server-side TTS)
-  → Client plays via Smallest AI Lightning v2 WebSocket TTS
-  → useUnifiedTTS hook (wraps useSmallestTTS, auto-fallback to browser TTS)
+  → POST /api/tts { text } → ElevenLabs streaming audio
+  → useElevenLabsTTS hook (audio playback, browser TTS fallback)
   → Repeat 3-4 exchanges
   → POST /api/scorecard → evaluatorAgent → JSON scorecard
 ```
@@ -43,10 +45,12 @@ Smallest AI Pulse WebSocket STT (client-side, 16kHz PCM)
 ### Key Layers
 
 - **`src/mastra/`** — Mastra agent definitions. Two agents share `groq("llama-3.3-70b-versatile")`. The investor agent responds in <3 sentences with no markdown. The evaluator agent returns strict JSON with 5 scored dimensions.
-- **`src/app/api/`** — Two POST routes. `/api/chat` calls the investor agent; returns JSON `{ agentText }` when `X-Skip-TTS: true` header present (default). `/api/scorecard` returns the evaluator's JSON scorecard.
-- **`src/hooks/`** — Seven hooks: `useSession` (phase machine), `useSmallestSTT` (Pulse WebSocket STT), `useSmallestTTS` (Lightning v2 WebSocket TTS), `useUnifiedSTT` (STT with auto-fallback), `useUnifiedTTS` (TTS with fallback chain), `useSpeechRecognition` (browser STT fallback), `useAudioPlayback` (browser TTS fallback).
-- **`src/lib/`** — `feature-flags.ts` (runtime STT/TTS provider selection with localStorage override), `llm-timeout.ts` (LLM response timeout tracking), `demo-script.ts` (console helpers for toggling providers).
-- **`src/components/PitchRoom.tsx`** — Main orchestrator. Uses unified STT/TTS hooks, time-based silence detection (5s warning, 15s auto-end), LLM timeout status UI. Single entry point rendered by `page.tsx`.
+- **`src/app/api/`** — Three POST routes: `/api/chat` (LLM only, returns JSON), `/api/tts` (ElevenLabs TTS, returns audio/mpeg), `/api/scorecard` (evaluator JSON).
+- **`src/hooks/useSession.ts`** — Merged orchestrator hook. Contains STT (`useSmallestSTT`), TTS (`useElevenLabsTTS`), LLM timeout tracking, silence event handling, phase machine, transcript, and history. PitchRoom delegates all logic here.
+- **`src/hooks/useSmallestSTT.ts`** — Smallest AI Pulse WebSocket STT with browser SpeechRecognition fallback. Dispatches `stt:silence-warning` and `stt:silence-timeout` custom events.
+- **`src/hooks/useElevenLabsTTS.ts`** — Calls `/api/tts` server route for ElevenLabs audio. Falls back to browser speechSynthesis.
+- **`src/lib/voice-config.ts`** — Runtime config for STT/TTS providers, timeouts, with localStorage override support.
+- **`src/components/PitchRoom.tsx`** — Main UI component. Thin orchestrator that delegates to `useSession`. Renders avatar, transcript, controls, silence warning, LLM timeout status, fallback indicators.
 
 ### Phase Progression
 

@@ -1,11 +1,8 @@
 "use client";
 
-import { useState, useEffect, useRef, useCallback } from "react";
+import { useState, useCallback } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import { useSession } from "@/hooks/useSession";
-import { useUnifiedSTT } from "@/hooks/useUnifiedSTT";
-import { useUnifiedTTS } from "@/hooks/useUnifiedTTS";
-import { useLLMTimeout } from "@/lib/llm-timeout";
 import { Scorecard as ScorecardType } from "@/types";
 import { MarcusAvatar } from "./MarcusAvatar";
 import { StatusHUD } from "./StatusHUD";
@@ -13,14 +10,13 @@ import { LiveDeckFeed } from "./LiveDeckFeed";
 import { TranscriptPanel } from "./TranscriptPanel";
 import { Scorecard } from "./Scorecard";
 
-// Animation timing constants (snappy & responsive)
+// Animation timing constants
 const ANIMATION = {
   pageTransition: 0.4,
   staggerDelay: 0.06,
   microInteraction: 0.15,
 };
 
-// Stagger animation variants
 const containerVariants = {
   hidden: { opacity: 0 },
   visible: {
@@ -72,207 +68,35 @@ const scaleIn = {
   },
 };
 
-// Button tap feedback
-const buttonTap = {
-  scale: [1, 0.98, 1],
-  transition: { duration: ANIMATION.microInteraction },
-};
-
 export function PitchRoom() {
   const session = useSession();
-  const tts = useUnifiedTTS();
-  const { fetchWithTimeout, status: llmStatus, getStallMessage } = useLLMTimeout();
   const [scorecard, setScorecard] = useState<ScorecardType | null>(null);
-  const [isProcessing, setIsProcessing] = useState(false);
-  const [agentSpeaking, setAgentSpeaking] = useState(false);
-  const [lastUserMessage, setLastUserMessage] = useState("");
   const [showRoom, setShowRoom] = useState(false);
-  const [silenceWarning, setSilenceWarning] = useState(false);
-  const interimRef = useRef("");
-  const finalTextRef = useRef("");
-  const lastSpeechTimestamp = useRef<number>(0);
-  const silenceIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
-  const {
-    start: startListening,
-    stop: stopListening,
-    isListening,
-    isSilent,
-    activeProvider: sttProvider,
-  } = useUnifiedSTT({
-    onResult: (transcript: string, isFinal: boolean) => {
-      lastSpeechTimestamp.current = Date.now();
-      setSilenceWarning(false);
-      if (!isFinal) {
-        interimRef.current = transcript;
-        session.addTranscriptEntry("user", transcript, true);
-      } else {
-        finalTextRef.current += transcript + " ";
-        session.addTranscriptEntry("user", transcript.trim(), false);
-      }
-    },
-    onError: (error: string) => {
-      console.error("STT Error:", error);
-    },
-  });
+  const isProcessing = session.sttState === "connecting" || session.ttsState === "synthesizing";
+  const isBusy = isProcessing || session.isSpeaking;
 
-  // Time-based silence detection
-  useEffect(() => {
-    if (!isListening) {
-      if (silenceIntervalRef.current) {
-        clearInterval(silenceIntervalRef.current);
-        silenceIntervalRef.current = null;
-      }
-      setSilenceWarning(false);
-      return;
-    }
-
-    lastSpeechTimestamp.current = Date.now();
-
-    silenceIntervalRef.current = setInterval(() => {
-      const elapsed = Date.now() - lastSpeechTimestamp.current;
-      if (elapsed >= 15000 && finalTextRef.current.trim()) {
-        handleEndTurn();
-      } else if (elapsed >= 5000) {
-        setSilenceWarning(true);
-      } else {
-        setSilenceWarning(false);
-      }
-    }, 1000);
-
-    return () => {
-      if (silenceIntervalRef.current) {
-        clearInterval(silenceIntervalRef.current);
-        silenceIntervalRef.current = null;
-      }
-    };
-  }, [isListening]);
+  const handleStartPitch = useCallback(async () => {
+    setScorecard(null);
+    setShowRoom(true);
+    // Small delay for room animation
+    setTimeout(() => session.startPitch(), 1200);
+  }, [session]);
 
   const handleEndTurn = useCallback(async () => {
-    if (!finalTextRef.current.trim() || isProcessing) return;
+    await session.submitTurn();
+  }, [session]);
 
-    stopListening();
-    setSilenceWarning(false);
-    setIsProcessing(true);
+  const handleEndCall = useCallback(async () => {
+    const result = await session.endSession();
+    if (result) setScorecard(result);
+  }, [session]);
 
-    const userMessage = finalTextRef.current.trim();
-    finalTextRef.current = "";
-    interimRef.current = "";
-    setLastUserMessage(userMessage);
-    session.addHistoryEntry("user", userMessage);
-
-    const headers: Record<string, string> = {
-      "Content-Type": "application/json",
-    };
-    if (tts.isSmallestActive) {
-      headers["X-Skip-TTS"] = "true";
-    }
-
-    try {
-      const response = await fetchWithTimeout("/api/chat", {
-        method: "POST",
-        headers,
-        body: JSON.stringify({
-          userMessage,
-          history: session.history,
-        }),
-      });
-
-      if (!response.ok) throw new Error("Chat API failed");
-
-      // Extract agent text — from header or JSON body
-      let decodedAgentText: string;
-      const headerText = response.headers.get("X-Agent-Text");
-      if (headerText) {
-        decodedAgentText = decodeURIComponent(headerText);
-      } else {
-        const json = await response.json();
-        decodedAgentText = json.agentText;
-      }
-
-      session.addHistoryEntry("assistant", decodedAgentText);
-      session.addTranscriptEntry("investor", decodedAgentText, false);
-      session.recordExchange();
-
-      setAgentSpeaking(true);
-      try {
-        if (tts.isSmallestActive) {
-          // Client-side TTS via Smallest AI
-          await tts.speak(decodedAgentText);
-        } else {
-          // Server-side TTS via ElevenLabs (audio in response body)
-          const audioBlob = await response.blob();
-          if (audioBlob.size > 0) {
-            await tts.playAudio(audioBlob);
-          } else {
-            await tts.playFallbackTTS(decodedAgentText);
-          }
-        }
-      } catch (audioError) {
-        console.error("Audio playback failed:", audioError);
-        await tts.playFallbackTTS(decodedAgentText);
-      } finally {
-        setAgentSpeaking(false);
-      }
-
-      if (session.phase !== "scorecard") {
-        setTimeout(() => startListening(), 500);
-      }
-    } catch (error) {
-      console.error("Chat error:", error);
-      setAgentSpeaking(false);
-      const fallback = getStallMessage();
-      session.addTranscriptEntry("investor", fallback, false);
-      session.addHistoryEntry("assistant", fallback);
-      if (session.phase !== "scorecard") {
-        setTimeout(() => startListening(), 1000);
-      }
-    } finally {
-      setIsProcessing(false);
-    }
-  }, [isProcessing, session, stopListening, startListening, tts, fetchWithTimeout, getStallMessage]);
-
-  const handleStartPitch = () => {
+  const handlePracticeAgain = useCallback(() => {
     setScorecard(null);
-    setSilenceWarning(false);
-    session.startPitch();
-    setShowRoom(true);
-    setTimeout(() => startListening(), 1200);
-  };
-
-  const handleEndCall = () => {
-    stopListening();
-    tts.stop();
-    session.endPitch();
-    generateScorecard();
-  };
-
-  const generateScorecard = async () => {
-    try {
-      const response = await fetch("/api/scorecard", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ transcript: session.transcript }),
-      });
-
-      if (!response.ok) {
-        console.error("Scorecard generation failed:", await response.json());
-        return;
-      }
-
-      const data = await response.json();
-      setScorecard(data);
-    } catch (error) {
-      console.error("Scorecard error:", error);
-    }
-  };
-
-  const handlePracticeAgain = () => {
-    setScorecard(null);
-    setSilenceWarning(false);
     setShowRoom(false);
     session.reset();
-  };
+  }, [session]);
 
   // ── Scorecard View ──
   if (scorecard) {
@@ -297,7 +121,7 @@ export function PitchRoom() {
           }}
         />
 
-        {/* Radial glow behind content */}
+        {/* Radial glow */}
         <div
           className="absolute w-[800px] h-[800px] rounded-full"
           style={{
@@ -389,7 +213,7 @@ export function PitchRoom() {
             variants={itemVariants}
             className="font-mono text-[10px] text-text-muted/40 tracking-[0.3em] uppercase"
           >
-            Smallest AI &middot; Groq &middot; Mastra
+            Smallest AI &middot; ElevenLabs &middot; Groq &middot; Mastra
           </motion.p>
         </motion.div>
       </div>
@@ -429,7 +253,7 @@ export function PitchRoom() {
         initial="hidden"
         animate="visible"
       >
-        {/* ── Top Bar: Logo + HUD ── */}
+        {/* ── Top Bar ── */}
         <motion.header variants={itemVariants} className="px-6 py-4 flex items-center justify-between gap-4">
           <div className="flex items-center gap-3">
             <div className="w-8 h-8 rounded-full border border-border-bright flex items-center justify-center">
@@ -444,16 +268,27 @@ export function PitchRoom() {
             </span>
           </div>
 
-          <StatusHUD
-            phase={session.phase}
-            elapsedSeconds={session.elapsedSeconds}
-            exchangeCount={session.exchangeCount}
-          />
+          <div className="flex items-center gap-3">
+            <StatusHUD
+              phase={session.phase}
+              elapsedSeconds={session.elapsedSeconds}
+              exchangeCount={session.exchangeCount}
+            />
 
-          {/* End call button */}
+            {/* Fallback indicators */}
+            <div className="flex gap-2">
+              {session.usingFallbackSTT && (
+                <span className="font-mono text-[9px] text-amber-400 tracking-wider">STT: Fallback</span>
+              )}
+              {session.usingFallbackTTS && (
+                <span className="font-mono text-[9px] text-amber-400 tracking-wider">TTS: Fallback</span>
+              )}
+            </div>
+          </div>
+
           <button
             onClick={handleEndCall}
-            disabled={isProcessing || agentSpeaking}
+            disabled={isBusy}
             className="grain-hover px-5 py-2 rounded-md font-mono text-[10px] tracking-[0.15em] uppercase font-bold transition-all duration-300 disabled:opacity-30 disabled:cursor-not-allowed cursor-pointer"
             style={{
               background: "rgba(255, 59, 92, 0.08)",
@@ -475,11 +310,11 @@ export function PitchRoom() {
           </button>
         </motion.header>
 
-        {/* ── Main Content: Asymmetric Grid ── */}
+        {/* ── Main Content ── */}
         <div className="flex-1 px-6 pb-6 grid grid-cols-[1fr_320px] gap-5 min-h-0">
           {/* Left: Visualizer + Transcript + Controls */}
           <motion.div variants={slideInLeft} className="flex flex-col gap-5 min-h-0">
-            {/* Marcus Avatar - Central Visualizer */}
+            {/* Marcus Avatar */}
             <motion.div
               variants={scaleIn}
               className="glass-panel rounded-xl flex items-center justify-center py-8 relative scanline"
@@ -503,14 +338,14 @@ export function PitchRoom() {
               </div>
 
               <MarcusAvatar
-                isSpeaking={agentSpeaking}
-                isListening={isListening && !agentSpeaking}
+                isSpeaking={session.isSpeaking}
+                isListening={session.isListening && !session.isSpeaking}
                 isProcessing={isProcessing}
               />
 
-              {/* LLM timeout status */}
+              {/* Marcus thinking status */}
               <AnimatePresence>
-                {llmStatus !== "idle" && (
+                {session.marcusThinking !== "idle" && (
                   <motion.div
                     initial={{ opacity: 0, y: 10 }}
                     animate={{ opacity: 1, y: 0 }}
@@ -518,7 +353,7 @@ export function PitchRoom() {
                     className="absolute bottom-4 left-0 right-0 text-center"
                   >
                     <span className="font-mono text-[11px] tracking-wider text-cyan/70">
-                      {llmStatus === "thinking"
+                      {session.marcusThinking === "thinking"
                         ? "Marcus is thinking..."
                         : "Marcus is still thinking..."}
                     </span>
@@ -526,6 +361,23 @@ export function PitchRoom() {
                 )}
               </AnimatePresence>
             </motion.div>
+
+            {/* Silence warning banner */}
+            <AnimatePresence>
+              {session.silenceWarning && session.isListening && (
+                <motion.div
+                  initial={{ opacity: 0, height: 0 }}
+                  animate={{ opacity: 1, height: "auto" }}
+                  exit={{ opacity: 0, height: 0 }}
+                  className="bg-amber-500/10 border border-amber-500/30 text-amber-200 px-4 py-2 rounded-lg flex items-center gap-2"
+                >
+                  <span className="w-2 h-2 bg-amber-400 rounded-full animate-ping" />
+                  <span className="font-mono text-[11px] tracking-wider">
+                    Still listening...
+                  </span>
+                </motion.div>
+              )}
+            </AnimatePresence>
 
             {/* Transcript */}
             <motion.div variants={itemVariants} className="flex-1 min-h-0">
@@ -539,8 +391,8 @@ export function PitchRoom() {
                 <div className="flex-1 overflow-hidden">
                   <TranscriptPanel
                     transcript={session.transcript}
-                    isListening={isListening}
-                    isSilent={isSilent}
+                    isListening={session.isListening}
+                    isSilent={false}
                   />
                 </div>
               </div>
@@ -550,27 +402,24 @@ export function PitchRoom() {
             <motion.div variants={itemVariants} className="flex items-center gap-4">
               <button
                 onClick={
-                  isListening
-                    ? () => {
-                        stopListening();
-                        handleEndTurn();
-                      }
-                    : () => startListening()
+                  session.isListening
+                    ? handleEndTurn
+                    : () => session.startPitch()
                 }
-                disabled={isProcessing || agentSpeaking}
+                disabled={isBusy}
                 className="grain-hover flex-1 py-3.5 rounded-lg font-mono text-xs tracking-[0.15em] uppercase font-bold transition-all duration-300 disabled:opacity-30 disabled:cursor-not-allowed cursor-pointer"
                 style={{
-                  background: isListening
+                  background: session.isListening
                     ? "rgba(0, 255, 178, 0.1)"
                     : "rgba(0, 245, 255, 0.08)",
                   border: `1px solid ${
-                    isListening ? "rgba(0, 255, 178, 0.3)" : "rgba(0, 245, 255, 0.2)"
+                    session.isListening ? "rgba(0, 255, 178, 0.3)" : "rgba(0, 245, 255, 0.2)"
                   }`,
-                  color: isListening ? "#00FFB2" : "#00F5FF",
+                  color: session.isListening ? "#00FFB2" : "#00F5FF",
                 }}
                 onMouseEnter={(e) => {
                   if (!e.currentTarget.disabled) {
-                    e.currentTarget.style.boxShadow = isListening
+                    e.currentTarget.style.boxShadow = session.isListening
                       ? "0 0 25px rgba(0, 255, 178, 0.15)"
                       : "0 0 25px rgba(0, 245, 255, 0.15)";
                   }
@@ -579,16 +428,18 @@ export function PitchRoom() {
                   e.currentTarget.style.boxShadow = "none";
                 }}
               >
-                {isProcessing
-                  ? "Processing..."
-                  : isListening
+                {session.isSpeaking
+                  ? "Marcus Speaking..."
+                  : session.ttsState === "synthesizing"
+                  ? "Generating Voice..."
+                  : session.isListening
                   ? "Stop & Send"
                   : "Start Speaking"}
               </button>
 
               {/* Recording indicator */}
               <AnimatePresence>
-                {isListening && (
+                {session.isListening && (
                   <motion.div
                     initial={{ opacity: 0, scale: 0.8 }}
                     animate={{ opacity: 1, scale: 1 }}
@@ -604,20 +455,6 @@ export function PitchRoom() {
                       Rec
                     </span>
                   </motion.div>
-                )}
-              </AnimatePresence>
-
-              {/* Silence warning */}
-              <AnimatePresence>
-                {silenceWarning && isListening && (
-                  <motion.span
-                    initial={{ opacity: 0 }}
-                    animate={{ opacity: 1 }}
-                    exit={{ opacity: 0 }}
-                    className="font-mono text-[10px] text-text-muted tracking-wider"
-                  >
-                    Still listening...
-                  </motion.span>
                 )}
               </AnimatePresence>
             </motion.div>

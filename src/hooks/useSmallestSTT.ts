@@ -1,16 +1,20 @@
 "use client";
 
-import { useEffect, useRef, useState, useCallback } from "react";
-import { getSmallestAPIKey } from "@/lib/feature-flags";
+import { useCallback, useEffect, useRef, useState } from "react";
+import { VOICE_CONFIG } from "@/lib/voice-config";
 
-interface UseSmallestSTTProps {
-  onResult: (transcript: string, isFinal: boolean) => void;
-  onError?: (error: string) => void;
+export type STTState = "idle" | "connecting" | "listening" | "error";
+
+interface UseSmallestSTTReturn {
+  transcript: string;
+  interimTranscript: string;
+  state: STTState;
+  error: string | null;
+  startListening: () => Promise<void>;
+  stopListening: () => void;
+  reset: () => void;
+  usingFallback: boolean;
 }
-
-const PULSE_WS_URL = "wss://waves-api.smallest.ai/api/v1/pulse/get_text";
-const SAMPLE_RATE = 16000;
-const SILENCE_TIMEOUT_MS = 2000;
 
 function float32ToInt16(float32: Float32Array): Int16Array {
   const int16 = new Int16Array(float32.length);
@@ -21,30 +25,43 @@ function float32ToInt16(float32: Float32Array): Int16Array {
   return int16;
 }
 
-export function useSmallestSTT({ onResult, onError }: UseSmallestSTTProps) {
+export function useSmallestSTT(): UseSmallestSTTReturn {
+  const [transcript, setTranscript] = useState("");
+  const [interimTranscript, setInterimTranscript] = useState("");
+  const [state, setState] = useState<STTState>("idle");
+  const [error, setError] = useState<string | null>(null);
+  const [usingFallback, setUsingFallback] = useState(false);
+
   const wsRef = useRef<WebSocket | null>(null);
   const audioContextRef = useRef<AudioContext | null>(null);
   const processorRef = useRef<ScriptProcessorNode | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
-  const silenceTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const [isListening, setIsListening] = useState(false);
-  const [isSilent, setIsSilent] = useState(false);
-  const onResultRef = useRef(onResult);
-  const onErrorRef = useRef(onError);
+  const fallbackRef = useRef<any>(null);
+  const silenceWarningRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const silenceAutoEndRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-  useEffect(() => {
-    onResultRef.current = onResult;
-  }, [onResult]);
+  const resetSilenceTimers = useCallback(() => {
+    if (silenceWarningRef.current) clearTimeout(silenceWarningRef.current);
+    if (silenceAutoEndRef.current) clearTimeout(silenceAutoEndRef.current);
 
-  useEffect(() => {
-    onErrorRef.current = onError;
-  }, [onError]);
+    silenceWarningRef.current = setTimeout(() => {
+      window.dispatchEvent(new CustomEvent("stt:silence-warning"));
+
+      silenceAutoEndRef.current = setTimeout(() => {
+        window.dispatchEvent(new CustomEvent("stt:silence-timeout"));
+      }, VOICE_CONFIG.TIMEOUTS.SILENCE_AUTO_END - VOICE_CONFIG.TIMEOUTS.SILENCE_WARNING);
+    }, VOICE_CONFIG.TIMEOUTS.SILENCE_WARNING);
+  }, []);
+
+  const clearSilenceTimers = useCallback(() => {
+    if (silenceWarningRef.current) clearTimeout(silenceWarningRef.current);
+    if (silenceAutoEndRef.current) clearTimeout(silenceAutoEndRef.current);
+    silenceWarningRef.current = null;
+    silenceAutoEndRef.current = null;
+  }, []);
 
   const cleanup = useCallback(() => {
-    if (silenceTimeoutRef.current) {
-      clearTimeout(silenceTimeoutRef.current);
-      silenceTimeoutRef.current = null;
-    }
+    clearSilenceTimers();
     if (processorRef.current) {
       processorRef.current.disconnect();
       processorRef.current = null;
@@ -61,45 +78,97 @@ export function useSmallestSTT({ onResult, onError }: UseSmallestSTTProps) {
       wsRef.current.close();
       wsRef.current = null;
     }
-  }, []);
-
-  const start = useCallback(async () => {
-    if (isListening) return;
-
-    const apiKey = getSmallestAPIKey();
-    if (!apiKey) {
-      onErrorRef.current?.("Smallest AI API key not configured");
-      return;
+    if (fallbackRef.current) {
+      fallbackRef.current.abort();
+      fallbackRef.current = null;
     }
+  }, [clearSilenceTimers]);
 
-    try {
-      const stream = await navigator.mediaDevices.getUserMedia({
-        audio: { sampleRate: SAMPLE_RATE, channelCount: 1, echoCancellation: true },
-      });
-      streamRef.current = stream;
+  const setupFallbackSTT = useCallback(() => {
+    const SpeechRecognition =
+      (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
+    if (!SpeechRecognition) return false;
 
-      const audioContext = new AudioContext({ sampleRate: SAMPLE_RATE });
-      audioContextRef.current = audioContext;
+    const recognition = new SpeechRecognition();
+    recognition.continuous = true;
+    recognition.interimResults = true;
+    recognition.lang = "en-US";
 
-      const source = audioContext.createMediaStreamSource(stream);
-      // Buffer size 4096 at 16kHz = 256ms chunks
-      const processor = audioContext.createScriptProcessor(4096, 1, 1);
-      processorRef.current = processor;
+    recognition.onresult = (event: any) => {
+      let interim = "";
+      let final = "";
+      for (let i = event.resultIndex; i < event.results.length; i++) {
+        const t = event.results[i][0].transcript;
+        if (event.results[i].isFinal) final += t;
+        else interim += t;
+      }
+      if (final) {
+        setTranscript((prev) => (prev + " " + final).trim());
+        resetSilenceTimers();
+      }
+      setInterimTranscript(interim);
+    };
 
-      const ws = new WebSocket(PULSE_WS_URL);
-      wsRef.current = ws;
+    recognition.onerror = (e: any) => {
+      if (e.error !== "no-speech" && e.error !== "aborted") {
+        console.error("Fallback STT error:", e.error);
+      }
+    };
+
+    recognition.onend = () => {
+      // Auto-restart if still supposed to be listening
+      if (state === "listening" && fallbackRef.current) {
+        try {
+          recognition.start();
+        } catch {
+          // Already started
+        }
+      }
+    };
+
+    fallbackRef.current = recognition;
+    return true;
+  }, [resetSilenceTimers, state]);
+
+  const startSmallestSTT = useCallback(async (): Promise<void> => {
+    const apiKey = process.env.NEXT_PUBLIC_SMALLEST_API_KEY;
+    if (!apiKey) throw new Error("Smallest AI API key not configured");
+
+    const stream = await navigator.mediaDevices.getUserMedia({
+      audio: {
+        sampleRate: VOICE_CONFIG.SMALLEST.SAMPLE_RATE,
+        channelCount: 1,
+        echoCancellation: true,
+        noiseSuppression: true,
+      },
+    });
+    streamRef.current = stream;
+
+    const audioContext = new AudioContext({
+      sampleRate: VOICE_CONFIG.SMALLEST.SAMPLE_RATE,
+    });
+    audioContextRef.current = audioContext;
+
+    const source = audioContext.createMediaStreamSource(stream);
+    const processor = audioContext.createScriptProcessor(4096, 1, 1);
+    processorRef.current = processor;
+
+    const ws = new WebSocket(VOICE_CONFIG.SMALLEST.WS_URL);
+    wsRef.current = ws;
+
+    return new Promise((resolve, reject) => {
+      const timeout = setTimeout(() => reject(new Error("Connection timeout")), 5000);
 
       ws.onopen = () => {
-        // Send config message
+        clearTimeout(timeout);
         ws.send(
           JSON.stringify({
             token: apiKey,
-            sample_rate: SAMPLE_RATE,
-            language: "en",
+            sample_rate: VOICE_CONFIG.SMALLEST.SAMPLE_RATE,
+            language: VOICE_CONFIG.SMALLEST.LANGUAGE,
           })
         );
 
-        // Start audio pipeline
         processor.onaudioprocess = (e) => {
           if (ws.readyState !== WebSocket.OPEN) return;
           const pcm = float32ToInt16(e.inputBuffer.getChannelData(0));
@@ -108,58 +177,90 @@ export function useSmallestSTT({ onResult, onError }: UseSmallestSTTProps) {
 
         source.connect(processor);
         processor.connect(audioContext.destination);
-        setIsListening(true);
-        setIsSilent(false);
+        setState("listening");
+        resetSilenceTimers();
+        resolve();
       };
 
       ws.onmessage = (event) => {
         try {
           const data = JSON.parse(event.data);
           if (data.transcript) {
-            // Reset silence timer on any speech
-            if (silenceTimeoutRef.current) {
-              clearTimeout(silenceTimeoutRef.current);
-            }
-            setIsSilent(false);
-
-            onResultRef.current(data.transcript, !!data.is_final);
-
             if (data.is_final) {
-              silenceTimeoutRef.current = setTimeout(() => {
-                setIsSilent(true);
-              }, SILENCE_TIMEOUT_MS);
+              setTranscript((prev) => (prev + " " + data.transcript).trim());
+              setInterimTranscript("");
+            } else {
+              setInterimTranscript(data.transcript);
             }
+            resetSilenceTimers();
           }
         } catch {
-          // Ignore non-JSON messages
+          // Ignore non-JSON
         }
       };
 
       ws.onerror = () => {
-        onErrorRef.current?.("Smallest AI STT WebSocket error");
-        cleanup();
-        setIsListening(false);
+        clearTimeout(timeout);
+        reject(new Error("WebSocket error"));
       };
 
       ws.onclose = () => {
-        setIsListening(false);
+        setState("idle");
       };
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : "Microphone access failed";
-      onErrorRef.current?.(msg);
-      cleanup();
+    });
+  }, [resetSilenceTimers]);
+
+  const startListening = useCallback(async () => {
+    setError(null);
+    setTranscript("");
+    setInterimTranscript("");
+
+    if (VOICE_CONFIG.SMALLEST.ENABLED) {
+      try {
+        setState("connecting");
+        setUsingFallback(false);
+        await startSmallestSTT();
+        return;
+      } catch (err) {
+        console.warn("Smallest STT failed, falling back:", err);
+      }
     }
-  }, [isListening, cleanup]);
 
-  const stop = useCallback(() => {
+    // Fallback to browser STT
+    setUsingFallback(true);
+    if (setupFallbackSTT()) {
+      setState("listening");
+      fallbackRef.current.start();
+      resetSilenceTimers();
+    } else {
+      setState("error");
+      setError("Speech recognition not supported in this browser");
+    }
+  }, [startSmallestSTT, setupFallbackSTT, resetSilenceTimers]);
+
+  const stopListening = useCallback(() => {
     cleanup();
-    setIsListening(false);
-    setIsSilent(false);
+    setState("idle");
   }, [cleanup]);
 
-  useEffect(() => {
-    return cleanup;
-  }, [cleanup]);
+  const reset = useCallback(() => {
+    setTranscript("");
+    setInterimTranscript("");
+    setError(null);
+    setState("idle");
+    setUsingFallback(false);
+  }, []);
 
-  return { start, stop, isListening, isSilent };
+  useEffect(() => cleanup, [cleanup]);
+
+  return {
+    transcript,
+    interimTranscript,
+    state,
+    error,
+    startListening,
+    stopListening,
+    reset,
+    usingFallback,
+  };
 }
