@@ -9,13 +9,15 @@
     "lint": "eslint"
   },
   "dependencies": {
+    "@ai-sdk/groq": "latest",
+    "@mastra/core": "latest",
+    "ai": "latest",
+    "elevenlabs": "latest",
+    "framer-motion": "^12.34.0",
+    "lucide-react": "^0.408.0",
     "next": "16.1.6",
     "react": "19.2.3",
-    "react-dom": "19.2.3",
-    "@mastra/core": "latest",
-    "@ai-sdk/groq": "latest",
-    "ai": "latest",
-    "elevenlabs": "latest"
+    "react-dom": "19.2.3"
   },
   "devDependencies": {
     "@tailwindcss/postcss": "^4",
