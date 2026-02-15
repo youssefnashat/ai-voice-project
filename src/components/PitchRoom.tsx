@@ -1,6 +1,7 @@
 "use client";
 
 import { useState, useCallback, useEffect, useRef } from "react";
+import { useSearchParams } from "next/navigation";
 import { motion, AnimatePresence } from "framer-motion";
 import { useSession } from "@/hooks/useSession";
 import { Scorecard as ScorecardType } from "@/types";
@@ -69,6 +70,9 @@ const scaleIn = {
 };
 
 export function PitchRoom() {
+  const searchParams = useSearchParams();
+  const agentId = searchParams.get('agent') || 'marcus';
+  
   const session = useSession();
   const [scorecard, setScorecard] = useState<ScorecardType | null>(null);
   const [showRoom, setShowRoom] = useState(false);
@@ -82,6 +86,13 @@ export function PitchRoom() {
     // Small delay for room animation
     setTimeout(() => session.startPitch(), 1200);
   }, [session]);
+
+  // Auto-start when arriving from select screen
+  useEffect(() => {
+    if (session.phase === "landing") {
+      handleStartPitch();
+    }
+  }, [handleStartPitch, session.phase]);
 
   const handleEndTurn = useCallback(async () => {
     await session.submitTurn();
@@ -115,119 +126,6 @@ export function PitchRoom() {
     return (
       <div className="flex items-center justify-center min-h-screen p-4">
         <Scorecard scorecard={scorecard} onPracticeAgain={handlePracticeAgain} />
-      </div>
-    );
-  }
-
-  // ── Landing View ──
-  if (session.phase === "landing" && !showRoom) {
-    return (
-      <div className="min-h-screen flex flex-col items-center justify-center relative overflow-hidden">
-        {/* Background grid */}
-        <div
-          className="absolute inset-0 opacity-[0.03]"
-          style={{
-            backgroundImage:
-              "linear-gradient(rgba(0, 245, 255, 0.3) 1px, transparent 1px), linear-gradient(90deg, rgba(0, 245, 255, 0.3) 1px, transparent 1px)",
-            backgroundSize: "60px 60px",
-          }}
-        />
-
-        {/* Radial glow */}
-        <div
-          className="absolute w-[800px] h-[800px] rounded-full"
-          style={{
-            background:
-              "radial-gradient(circle, rgba(0, 245, 255, 0.04) 0%, rgba(123, 97, 255, 0.02) 40%, transparent 70%)",
-          }}
-        />
-
-        <motion.div
-          className="relative z-10 text-center space-y-10"
-          variants={containerVariants}
-          initial="hidden"
-          animate="visible"
-        >
-          {/* Logo mark */}
-          <motion.div variants={itemVariants} className="flex justify-center">
-            <div className="w-16 h-16 rounded-full border border-border-bright flex items-center justify-center glow-cyan">
-              <div className="w-3 h-3 rounded-full bg-cyan animate-pulse-glow" />
-            </div>
-          </motion.div>
-
-          {/* Title */}
-          <motion.div variants={itemVariants}>
-            <h1
-              className="text-7xl font-bold tracking-tight text-glow-cyan"
-              style={{ fontFamily: "var(--font-clash-display), serif" }}
-            >
-              <span className="text-cyan">Voice</span>
-              <span className="text-foreground">Pitch</span>
-            </h1>
-          </motion.div>
-
-          {/* Subtitle */}
-          <motion.p
-            variants={itemVariants}
-            className="text-lg text-text-muted max-w-md mx-auto leading-relaxed"
-          >
-            Face Marcus Chen, AI Venture Capitalist.
-            <br />
-            <span className="text-foreground/60">Defend your startup. Secure the term sheet.</span>
-          </motion.p>
-
-          {/* Investor card preview */}
-          <motion.div
-            variants={scaleIn}
-            className="glass-panel-bright rounded-xl p-6 max-w-sm mx-auto glow-purple"
-          >
-            <div className="flex items-center gap-4">
-              <div className="w-12 h-12 rounded-full border border-purple/30 flex items-center justify-center">
-                <div className="w-2 h-2 rounded-full bg-purple animate-pulse-glow" />
-              </div>
-              <div className="text-left">
-                <p className="text-sm font-bold text-foreground">Marcus Chen</p>
-                <p className="text-[11px] text-text-muted font-mono">
-                  Managing Partner, Apex Ventures
-                </p>
-                <p className="text-[10px] text-purple/60 font-mono mt-0.5">
-                  $2.4B AUM &middot; 47 exits &middot; Skeptical by default
-                </p>
-              </div>
-            </div>
-          </motion.div>
-
-          {/* Start button */}
-          <motion.div variants={itemVariants}>
-            <button
-              onClick={handleStartPitch}
-              className="grain-hover group relative px-10 py-4 rounded-lg font-mono text-sm tracking-[0.15em] uppercase font-bold transition-all duration-300 cursor-pointer"
-              style={{
-                background: "linear-gradient(135deg, rgba(0, 245, 255, 0.1), rgba(0, 245, 255, 0.05))",
-                border: "1px solid rgba(0, 245, 255, 0.3)",
-                color: "#00F5FF",
-              }}
-              onMouseEnter={(e) => {
-                e.currentTarget.style.boxShadow = "0 0 30px rgba(0, 245, 255, 0.2), 0 0 60px rgba(0, 245, 255, 0.1)";
-                e.currentTarget.style.borderColor = "rgba(0, 245, 255, 0.6)";
-              }}
-              onMouseLeave={(e) => {
-                e.currentTarget.style.boxShadow = "none";
-                e.currentTarget.style.borderColor = "rgba(0, 245, 255, 0.3)";
-              }}
-            >
-              Enter the Pitch Room
-            </button>
-          </motion.div>
-
-          {/* Footer */}
-          <motion.p
-            variants={itemVariants}
-            className="font-mono text-[10px] text-text-muted/40 tracking-[0.3em] uppercase"
-          >
-            Smallest AI &middot; ElevenLabs &middot; Groq &middot; Mastra
-          </motion.p>
-        </motion.div>
       </div>
     );
   }
@@ -346,7 +244,7 @@ export function PitchRoom() {
               <div className="absolute top-4 left-5 flex items-center gap-2">
                 <div className="w-1 h-1 rounded-full bg-cyan" />
                 <span className="font-mono text-[10px] tracking-[0.2em] text-text-muted uppercase">
-                  Marcus Chen &middot; AI Core
+                  {agentId === 'marcus' ? 'Marcus Chen' : 'Mystery Investor'} &middot; AI Core
                 </span>
               </div>
 
