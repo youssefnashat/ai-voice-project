@@ -1,15 +1,7 @@
-"use client";
+'use client';
 
-import { useState } from "react";
-import { LandingPage } from "@/components/LandingPage";
-import { PitchRoom } from "@/components/PitchRoom";
+import LoadingScreen from '@/components/LoadingScreen';
 
 export default function Home() {
-  const [showPitchRoom, setShowPitchRoom] = useState(false);
-
-  if (showPitchRoom) {
-    return <PitchRoom />;
-  }
-
-  return <LandingPage onEnter={() => setShowPitchRoom(true)} />;
+  return <LoadingScreen />;
 }
