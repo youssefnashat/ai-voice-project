@@ -17,23 +17,38 @@ export interface ConversationHistory {
   content: string;
 }
 
-export interface DimensionScore {
-  score: number;
-  feedback: string;
+// YC-style 10-dimension scorecard
+export interface ScorecardScores {
+  clarity: number;
+  customer_pain: number;
+  solution_fit: number;
+  proof: number;
+  growth_wedge: number;
+  retention: number;
+  pricing_unit_econ: number;
+  competition_moat: number;
+  founder_strength: number;
+  speed_of_iteration: number;
+}
+
+export interface ScorecardRisk {
+  risk: string;
+  evidence_quote: string;
+  fix: string;
+}
+
+export interface YCFeedback {
+  what_i_believe_you_are_building: string;
+  what_i_need_to_believe_next: string[];
+  next_7_days: string[];
 }
 
 export interface Scorecard {
-  overall_score: number;
-  dimensions: {
-    clarity: DimensionScore;
-    market: DimensionScore;
-    traction: DimensionScore;
-    unit_economics: DimensionScore;
-    delivery: DimensionScore;
-  };
-  top_weakness: string;
-  rewritten_opener: string;
-  improved_answer: string;
+  one_sentence: string;
+  scores: ScorecardScores;
+  top_strengths: string[];
+  top_risks: ScorecardRisk[];
+  yc_style_feedback: YCFeedback;
 }
 
 export interface ChatRequest {
@@ -43,6 +58,7 @@ export interface ChatRequest {
 
 export interface ChatResponse {
   agentText: string;
+  confidence: number;
   audioUrl?: string;
 }
 

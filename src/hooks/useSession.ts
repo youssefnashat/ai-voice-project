@@ -9,9 +9,16 @@ import { VOICE_CONFIG } from "@/lib/voice-config";
 type LLMStatus = "idle" | "thinking" | "stalling";
 
 const STALL_MESSAGES = [
-  "That's an interesting point. Give me a moment.",
-  "Let me think about that for a second.",
-  "Good question — processing that now.",
+  "Hmm... give me a sec on that one.",
+  "Hold on, let me think about that.",
+  "One second... okay, go on.",
+];
+
+// Bluff-catching messages when confidence drops below 20
+const LOW_CONFIDENCE_MESSAGES = [
+  "Look... I'm going to be honest with you. I don't think you've done enough homework on this yet. The numbers aren't there, the answers are vague, and I can't see a clear path. Go back, talk to more users, get real data, and come back when you've got something concrete.",
+  "Okay, I'm going to stop you here. I've heard a lot of buzzwords but not a lot of substance. That's not a pitch—that's a wish list. Go build something real, get ten paying customers, and then let's talk again.",
+  "I'll be straight with you—I'm losing confidence in this. You're not ready for this conversation yet. And that's okay. Go ship something this week, talk to twenty users, come back with real numbers. I'll be here.",
 ];
 
 export function useSession() {
@@ -22,6 +29,7 @@ export function useSession() {
   const [elapsedSeconds, setElapsedSeconds] = useState(0);
   const [silenceWarning, setSilenceWarning] = useState(false);
   const [marcusThinking, setMarcusThinking] = useState<LLMStatus>("idle");
+  const [confidence, setConfidence] = useState(50);
 
   const stt = useSmallestSTT();
   const tts = useElevenLabsTTS();
@@ -33,6 +41,8 @@ export function useSession() {
   phaseRef.current = phase;
   const exchangeCountRef = useRef(exchangeCount);
   exchangeCountRef.current = exchangeCount;
+  const confidenceRef = useRef(confidence);
+  confidenceRef.current = confidence;
 
   // Silence event listeners
   useEffect(() => {
@@ -78,12 +88,13 @@ export function useSession() {
     []
   );
 
+  // Phase progression: setup (1-2) → rapid-fire (3-5) → pushback (6-7) → scorecard (8+)
   const recordExchange = useCallback(() => {
     setExchangeCount((prev) => {
       const next = prev + 1;
-      if (prev === 0) setPhase("qa");
-      else if (prev === 2) setPhase("negotiation");
-      else if (prev >= 3) setPhase("scorecard");
+      if (next >= 2 && next < 5) setPhase("qa");
+      else if (next >= 5 && next < 7) setPhase("negotiation");
+      else if (next >= 7) setPhase("scorecard");
       return next;
     });
   }, []);
@@ -96,8 +107,35 @@ export function useSession() {
     setElapsedSeconds(0);
     setSilenceWarning(false);
     setMarcusThinking("idle");
+    setConfidence(50);
     await stt.startListening();
   }, [stt]);
+
+  // Handle low confidence — agent catches the bluff, speaks dismissal, triggers scorecard
+  const handleLowConfidence = useCallback(
+    async (currentConfidence: number) => {
+      if (currentConfidence > 20) return false;
+
+      stt.stopListening();
+      setSilenceWarning(false);
+      setMarcusThinking("idle");
+
+      const dismissal =
+        LOW_CONFIDENCE_MESSAGES[
+          Math.floor(Math.random() * LOW_CONFIDENCE_MESSAGES.length)
+        ];
+
+      addTranscriptEntry("investor", dismissal, false);
+      addHistoryEntry("assistant", dismissal);
+
+      // Speak the dismissal, then send to scorecard
+      await tts.speak(dismissal);
+      setPhase("scorecard");
+
+      return true;
+    },
+    [stt, tts, addTranscriptEntry, addHistoryEntry]
+  );
 
   const submitTurn = useCallback(async () => {
     const userText = stt.transcript.trim();
@@ -139,12 +177,24 @@ export function useSession() {
 
       if (!response.ok) throw new Error("Chat API failed");
 
-      const { agentText } = await response.json();
-      const text = agentText || "That's interesting. Let me think about that.";
+      const { agentText, confidence: newConfidence } = await response.json();
+      const text = agentText || "Hmm... let me think about that for a second.";
+
+      // Update confidence from agent's assessment
+      if (typeof newConfidence === "number") {
+        setConfidence(newConfidence);
+      }
 
       addHistoryEntry("assistant", text);
       addTranscriptEntry("investor", text, false);
       recordExchange();
+
+      // Check if confidence dropped below 20 — catch the bluff
+      if (typeof newConfidence === "number" && newConfidence <= 20) {
+        await tts.speak(text);
+        await handleLowConfidence(newConfidence);
+        return;
+      }
 
       // Speak the response via ElevenLabs TTS
       await tts.speak(text);
@@ -171,7 +221,7 @@ export function useSession() {
         await stt.startListening();
       }
     }
-  }, [stt, tts, addTranscriptEntry, addHistoryEntry, recordExchange]);
+  }, [stt, tts, addTranscriptEntry, addHistoryEntry, recordExchange, handleLowConfidence]);
 
   const endSession = useCallback(async () => {
     stt.stopListening();
@@ -206,6 +256,7 @@ export function useSession() {
     setElapsedSeconds(0);
     setSilenceWarning(false);
     setMarcusThinking("idle");
+    setConfidence(50);
   }, [stt, tts]);
 
   return {
@@ -216,6 +267,7 @@ export function useSession() {
     exchangeCount,
     elapsedSeconds,
     setElapsedSeconds,
+    confidence,
 
     // STT state
     sttTranscript: stt.transcript,

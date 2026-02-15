@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useCallback } from "react";
+import { useState, useCallback, useEffect, useRef } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import { useSession } from "@/hooks/useSession";
 import { Scorecard as ScorecardType } from "@/types";
@@ -97,6 +97,18 @@ export function PitchRoom() {
     setShowRoom(false);
     session.reset();
   }, [session]);
+
+  // Auto-fetch scorecard when phase transitions to scorecard (e.g. from low confidence)
+  const prevPhaseRef = useRef(session.phase);
+  useEffect(() => {
+    if (session.phase === "scorecard" && prevPhaseRef.current !== "scorecard" && !scorecard) {
+      (async () => {
+        const result = await session.endSession();
+        if (result) setScorecard(result);
+      })();
+    }
+    prevPhaseRef.current = session.phase;
+  }, [session.phase, session, scorecard]);
 
   // ── Scorecard View ──
   if (scorecard) {
@@ -273,6 +285,7 @@ export function PitchRoom() {
               phase={session.phase}
               elapsedSeconds={session.elapsedSeconds}
               exchangeCount={session.exchangeCount}
+              confidence={session.confidence}
             />
 
             {/* Fallback indicators */}

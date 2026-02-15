@@ -8,13 +8,14 @@ interface StatusHUDProps {
   elapsedSeconds: number;
   maxSeconds?: number;
   exchangeCount: number;
+  confidence: number;
 }
 
 const PHASE_LABELS: Record<Phase, string> = {
   landing: "STANDBY",
-  pitch: "PITCH",
-  qa: "Q&A",
-  negotiation: "NEGOTIATION",
+  pitch: "SETUP",
+  qa: "RAPID-FIRE",
+  negotiation: "PUSHBACK",
   scorecard: "DEBRIEF",
 };
 
@@ -24,27 +25,20 @@ function formatTime(seconds: number): string {
   return `${m.toString().padStart(2, "0")}:${s.toString().padStart(2, "0")}`;
 }
 
-function getConfidenceLevel(exchangeCount: number, phase: Phase): number {
-  if (phase === "landing") return 0;
-  const base = 35;
-  const perExchange = 15;
-  return Math.min(95, base + exchangeCount * perExchange);
+function getConfidenceColor(confidence: number): string {
+  if (confidence <= 20) return "#FF3B5C"; // red — danger zone
+  if (confidence <= 40) return "#FF8C42"; // orange — skeptical
+  if (confidence <= 60) return "#00F5FF"; // cyan — neutral
+  if (confidence <= 80) return "#00FFB2"; // green — interested
+  return "#00FFB2"; // bright green — very interested
 }
 
-function getInvestorInterest(exchangeCount: number, phase: Phase): number {
-  if (phase === "landing") return 0;
-  if (phase === "pitch") return 20 + Math.random() * 10;
-  if (phase === "qa") return 40 + exchangeCount * 8;
-  if (phase === "negotiation") return 65 + exchangeCount * 5;
-  return 50;
-}
-
-export function StatusHUD({ phase, elapsedSeconds, maxSeconds = 300, exchangeCount }: StatusHUDProps) {
+export function StatusHUD({ phase, elapsedSeconds, maxSeconds = 300, exchangeCount, confidence }: StatusHUDProps) {
   const timeRemaining = Math.max(0, maxSeconds - elapsedSeconds);
   const timePercent = (timeRemaining / maxSeconds) * 100;
-  const confidence = getConfidenceLevel(exchangeCount, phase);
-  const interest = getInvestorInterest(exchangeCount, phase);
   const isLowTime = timeRemaining < 60;
+  const isLowConfidence = confidence <= 20;
+  const confidenceColor = getConfidenceColor(confidence);
 
   return (
     <motion.div
@@ -85,28 +79,37 @@ export function StatusHUD({ phase, elapsedSeconds, maxSeconds = 300, exchangeCou
 
       <div className="w-px h-6 bg-border-bright" />
 
-      {/* Confidence */}
-      <div className="flex items-center gap-3">
-        <span className="text-text-muted tracking-widest text-[10px] uppercase">Confidence</span>
-        <span className="text-emerald font-bold tabular-nums">{confidence}%</span>
-      </div>
-
-      <div className="w-px h-6 bg-border-bright" />
-
-      {/* Investor Interest */}
-      <div className="flex items-center gap-3 min-w-[180px]">
-        <span className="text-text-muted tracking-widest text-[10px] uppercase">Interest</span>
+      {/* Investor Confidence — now dynamic from LLM */}
+      <div className="flex items-center gap-3 min-w-[200px]">
+        <span className="text-text-muted tracking-widest text-[10px] uppercase">
+          {isLowConfidence ? "LOSING INTEREST" : "Confidence"}
+        </span>
         <div className="flex-1 h-1.5 bg-surface-elevated rounded-full overflow-hidden">
           <motion.div
             className="h-full rounded-full"
             style={{
-              background: "linear-gradient(90deg, #7B61FF, #00F5FF)",
+              background: `linear-gradient(90deg, ${confidenceColor}88, ${confidenceColor})`,
             }}
-            animate={{ width: `${interest}%` }}
+            animate={{ width: `${confidence}%` }}
             transition={{ duration: 0.8, ease: "easeOut" }}
           />
         </div>
-        <span className="text-purple font-bold tabular-nums text-[10px]">{Math.round(interest)}%</span>
+        <motion.span
+          className="font-bold tabular-nums text-[10px]"
+          style={{ color: confidenceColor }}
+          animate={isLowConfidence ? { opacity: [1, 0.4, 1] } : {}}
+          transition={isLowConfidence ? { duration: 0.8, repeat: Infinity } : {}}
+        >
+          {confidence}%
+        </motion.span>
+      </div>
+
+      <div className="w-px h-6 bg-border-bright" />
+
+      {/* Exchange count */}
+      <div className="flex items-center gap-2">
+        <span className="text-text-muted tracking-widest text-[10px] uppercase">Round</span>
+        <span className="text-foreground font-bold tabular-nums">{exchangeCount}</span>
       </div>
     </motion.div>
   );
