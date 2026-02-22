@@ -161,8 +161,10 @@ function AgentCard({ agent, isLoading, onSelect }: { agent: any, isLoading: bool
 
       {/* Tags */}
       <div className="flex flex-wrap justify-center gap-2 mb-6">
-        {agent.tags.map((tag: string) => (
-          <span key={tag} className={cn(
+        {Array.from(new Set(agent.tags ?? [])).map((tag: string, i: number) => {
+          const safeTag = typeof tag === 'string' ? tag.trim() : String(tag);
+          return (
+          <span key={`${safeTag || 'tag'}-${i}`} className={cn(
             "px-2 py-1 rounded-full text-[10px] font-bold uppercase tracking-wider",
             agent.available 
               ? "bg-white/10 text-gray-300" 
@@ -170,7 +172,8 @@ function AgentCard({ agent, isLoading, onSelect }: { agent: any, isLoading: bool
           )}>
             {tag}
           </span>
-        ))}
+          );
+        })}
       </div>
 
       {/* Description */}
