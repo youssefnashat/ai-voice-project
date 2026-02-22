@@ -161,7 +161,7 @@ function AgentCard({ agent, isLoading, onSelect }: { agent: any, isLoading: bool
 
       {/* Tags */}
       <div className="flex flex-wrap justify-center gap-2 mb-6">
-        {Array.from(new Set(agent.tags ?? [])).map((tag: string, i: number) => {
+        {(Array.from(new Set(agent.tags ?? [])) as string[]).map((tag, i) => {
           const safeTag = typeof tag === 'string' ? tag.trim() : String(tag);
           return (
           <span key={`${safeTag || 'tag'}-${i}`} className={cn(

@@ -1,7 +1,12 @@
 "use client";
 
+import { Suspense } from "react";
 import { PitchRoom } from "@/components/PitchRoom";
 
 export default function PitchRoomPage() {
-  return <PitchRoom />;
+  return (
+    <Suspense>
+      <PitchRoom />
+    </Suspense>
+  );
 }
